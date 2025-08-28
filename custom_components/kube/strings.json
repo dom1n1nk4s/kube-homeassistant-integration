@@ -1,0 +1,48 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "KUBE Gate System Setup",
+        "description": "Configure your KUBE gate system",
+        "data": {
+          "mac_address": "MAC Address",
+          "device_name": "Device Name",
+          "auth_method": "Authentication Method"
+        }
+      },
+      "auth_passkey": {
+        "title": "Passkey Authentication",
+        "description": "Enter your KUBE device passkey",
+        "data": {
+          "passkey": "Passkey"
+        }
+      },
+      "auth_master_key": {
+        "title": "Master Key Authentication",
+        "description": "Enter your KUBE device master key and optional passkey",
+        "data": {
+          "master_key": "Master Key",
+          "passkey": "Passkey (optional)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to device",
+      "invalid_auth": "Invalid authentication credentials",
+      "device_not_found": "Device not found or invalid MAC address",
+      "bluetooth_error": "Bluetooth communication error",
+      "unknown": "Unexpected error occurred"
+    },
+    "abort": {
+      "already_configured": "Device is already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "KUBE Gate System Options",
+        "description": "Configure options for your KUBE gate system"
+      }
+    }
+  }
+}
