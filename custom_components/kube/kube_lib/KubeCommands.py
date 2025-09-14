@@ -1,8 +1,11 @@
 import asyncio
+import logging
 from enum import IntEnum
 from typing import Optional
 from .OperationBuilder import OperationBuilder, C30BOperation
 from .KubeBtClient import KubeBtClient
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class KubeCommands:
@@ -257,7 +260,6 @@ class KubeCommands:
             if sn_data:
                 device = self.kube_bt_client.get_kube_device(self.mac)
                 device.put_device_param_bytes("sn", sn_data)
-                print(f"Device SN: {sn_data.decode('utf-8', errors='ignore')}")
             
             # Set up notifications
             def notification_callback(sender, data):
@@ -282,15 +284,20 @@ class KubeCommands:
                 device = self.kube_bt_client.get_kube_device(self.mac)
                 self._process_nonce_and_generate_keys(device, nonce_data)
                 
-                # Write token for authentication
-                token = device.get_device_param_bytes("token")
-                if token:
-                    await self.kube_bt_client.write_characteristic_async(
-                        client,
-                        "f1170001-0190-4567-8fab-4d4158a4eeaf",
-                        "f1170005-0190-4567-8fab-4d4158a4eeaf",
-                        token
-                    )
+                # Write token for authentication using the special encryption method
+                # This mimics the original payload-based approach
+                bundle = {}  # Empty bundle - the method will use stored token
+                await self.kube_bt_client.write_bt_gatt_characteristic_with_encryption_async(
+                    self.mac,
+                    "f1170001-0190-4567-8fab-4d4158a4eeaf",
+                    "f1170005-0190-4567-8fab-4d4158a4eeaf",
+                    client,
+                    None,  # characteristic object not needed for this UUID
+                    bundle
+                )
+                
+                # Wait a bit for the write to complete
+                await asyncio.sleep(0.5)
                 
                 # Check security state
                 sec_state = await self.kube_bt_client.read_characteristic_async(
@@ -300,53 +307,56 @@ class KubeCommands:
                 )
                 
                 if sec_state and len(sec_state) > 0 and sec_state[0] == 1:
-                    print("Authentication successful")
+                    _LOGGER.debug("Authentication successful for device %s", self.mac)
                     return True
                 else:
-                    print("Authentication failed")
+                    _LOGGER.warning("Authentication failed for device %s - sec_state: %s", 
+                                  self.mac, sec_state.hex() if sec_state else 'None')
                     return False
             
             return False
             
         except Exception as e:
-            print(f"Connection/authentication failed: {e}")
+            _LOGGER.error("Connection/authentication failed for device %s: %s", self.mac, e)
             if retry_once:
-                print("Retrying once...")
+                _LOGGER.debug("Retrying connection for device %s", self.mac)
                 return await self._connect_and_authenticate_async(timeout, False)
             return False
     
     def _process_nonce_and_generate_keys(self, device, nonce_data):
-        """Process nonce and generate encryption keys"""
+        """Process nonce and generate encryption keys using the exact Java algorithm"""
         try:
             # Get stored passkey and serial number
             passkey = device.get_device_param_or_default("passkey", "")
             sn = device.get_device_param_or_default("sn", "")
             
             if passkey and sn:
-                # Generate enckey1 using AES encryption
                 passkey_bytes = passkey.encode('utf-8')
                 sn_bytes = sn.encode('utf-8') if isinstance(sn, str) else sn
                 
+                # Step 1: enckey1 = AES(passkey, sn)
                 enckey1 = self.kube_bt_client.encrypt_data(passkey_bytes, sn_bytes)
                 device.put_device_param_bytes("enckey1", enckey1)
                 
-                # Generate enckey2 by XORing nonce with enckey1
-                enckey2 = bytearray(len(nonce_data))
-                self.kube_bt_client.cipher_helper_xor_byte_arrays(nonce_data, enckey2, enckey1)
-                device.put_device_param_bytes("enckey2", bytes(enckey2))
+                # Step 2: nonceXORedWithEnckey1 = nonce XOR enckey1
+                nonce_xor_enckey1 = bytearray(len(nonce_data))
+                self.kube_bt_client.cipher_helper_xor_byte_arrays(nonce_data, nonce_xor_enckey1, enckey1)
                 
-                # Generate token by XORing enckey1 with enckey2
-                token = bytearray(len(enckey1))
-                self.kube_bt_client.cipher_helper_xor_byte_arrays(enckey1, token, bytes(enckey2))
+                # Step 3: enckey2 = AES(passkey, nonceXORedWithEnckey1)
+                enckey2 = self.kube_bt_client.encrypt_data(passkey_bytes, bytes(nonce_xor_enckey1))
+                device.put_device_param_bytes("enckey2", enckey2)
+                
+                # Step 4: token = nonceXORedWithEnckey1 XOR enckey2
+                token = bytearray(len(nonce_xor_enckey1))
+                self.kube_bt_client.cipher_helper_xor_byte_arrays(bytes(nonce_xor_enckey1), token, enckey2)
                 device.put_device_param_bytes("token", bytes(token))
                 
-                print("Generated encryption keys and token")
             
         except Exception as e:
-            print(f"Error processing nonce: {e}")
+            _LOGGER.error("Error processing nonce for device %s: %s", self.mac, e)
     
     def _process_notification(self, device, data):
-        """Process notification data"""
+        """Process notification data with proper chunking support"""
         try:
             # Decrypt notification data
             enckey2 = device.get_device_param_bytes("enckey2")
@@ -356,17 +366,42 @@ class KubeCommands:
                 
                 # Try to decode as text
                 try:
-                    text = decrypted.decode('utf-8', errors='ignore')
-                    print(f"Notification: {text}")
+                    text_chunk = decrypted.decode('utf-8', errors='ignore')
+                    _LOGGER.debug("Notification chunk received for device %s: %s", self.mac, text_chunk)
                     
-                    # Store latest notification
-                    device.store_string_value("latest_notification", text)
+                    # Get existing notification buffer or create new one
+                    existing_buffer = device.get_device_param_or_default("notification_buffer", "")
+                    
+                    # Append new chunk to buffer
+                    updated_buffer = existing_buffer + text_chunk
+                    device.store_string_value("notification_buffer", updated_buffer)
+                    
+                    # Check if we have a complete message (ends with # or other delimiter)
+                    if text_chunk.endswith('#') or text_chunk.endswith('\n') or text_chunk.endswith('\r'):
+                        # Complete message received, store as latest notification
+                        device.store_string_value("latest_notification", updated_buffer.strip())
+                        _LOGGER.info("Complete notification received for device %s: %s", self.mac, updated_buffer.strip())
+                        
+                        # Clear the buffer for next message
+                        device.store_string_value("notification_buffer", "")
+                    else:
+                        # Partial message, keep buffering
+                        _LOGGER.debug("Buffering partial notification for device %s (total length: %d)", self.mac, len(updated_buffer))
                     
                 except Exception:
-                    print(f"Binary notification: {decrypted.hex()}")
+                    # Handle binary data
+                    _LOGGER.debug("Binary notification chunk received for device %s: %s", self.mac, decrypted.hex())
+                    
+                    # For binary data, we might also need to buffer
+                    existing_binary = device.get_device_param_bytes("binary_notification_buffer") or b""
+                    updated_binary = existing_binary + bytes(decrypted)
+                    device.put_device_param_bytes("binary_notification_buffer", updated_binary)
+                    
+                    # Store as latest binary notification (you might want different logic here)
+                    device.put_device_param_bytes("latest_binary_notification", updated_binary)
             
         except Exception as e:
-            print(f"Error processing notification: {e}")
+            _LOGGER.error("Error processing notification for device %s: %s", self.mac, e)
     
     async def _send_command_async(self, command: str) -> bool:
         """
@@ -386,6 +421,7 @@ class KubeCommands:
             
             client = self.kube_bt_client.connections.get(self.mac)
             if not client:
+                _LOGGER.error("No client connection found for device %s after authentication", self.mac)
                 return False
             
             # Encrypt and send command
@@ -408,11 +444,15 @@ class KubeCommands:
                     # Wait for response
                     await asyncio.sleep(1)
                     return True
+                else:
+                    _LOGGER.warning("Failed to write command '%s' to device %s", command, self.mac)
+            else:
+                _LOGGER.error("No encryption key (enckey2) available for device %s", self.mac)
             
             return False
             
         except Exception as e:
-            print(f"Command failed: {e}")
+            _LOGGER.error("Command '%s' failed for device %s: %s", command, self.mac, e)
             return False
         finally:
             # Always disconnect
@@ -503,7 +543,7 @@ class KubeCommands:
             return status
             
         except Exception as e:
-            print(f"Status request failed: {e}")
+            _LOGGER.error("Status request failed for device %s: %s", self.mac, e)
             return {}
         finally:
             # Always disconnect

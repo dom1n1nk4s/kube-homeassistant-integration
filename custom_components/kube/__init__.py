@@ -13,7 +13,7 @@ from .coordinator import KubeDataUpdateCoordinator
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[Platform] = [
-    Platform.SWITCH,
+    Platform.BUTTON,
     Platform.LIGHT,
     Platform.SENSOR,
 ]

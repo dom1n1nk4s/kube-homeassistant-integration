@@ -1,9 +1,12 @@
 import asyncio
+import logging
 import time
 from typing import Dict, Optional, Any, List
 import uuid
 from .KubeDevice import KubeDevice
 from .BluetoothPayload import BluetoothPayload
+
+_LOGGER = logging.getLogger(__name__)
 
 try:
     import bleak
@@ -189,23 +192,53 @@ class KubeBtClient:
     async def write_characteristic_async(self, client: BleakClient, service_uuid: str,
                                        characteristic_uuid: str, data: bytes, 
                                        response: bool = True) -> bool:
-        """Write characteristic value asynchronously"""
+        """Write characteristic value asynchronously with enhanced error handling"""
         try:
-            print(f"[WRITE] WRITE DATA to {characteristic_uuid}: {data.hex()}")
-            await client.write_gatt_char(characteristic_uuid, data, response=response)
+            # Check connection status before writing
+            if not client.is_connected:
+                _LOGGER.error("Cannot write to characteristic %s: Client not connected", characteristic_uuid)
+                return False
+            
+            _LOGGER.debug("Writing data to characteristic %s: %s", characteristic_uuid, data.hex())
+            
+            # Add timeout to prevent hanging on connection issues
+            await asyncio.wait_for(
+                client.write_gatt_char(characteristic_uuid, data, response=response),
+                timeout=10.0  # 10 second timeout
+            )
+            
+            _LOGGER.debug("Successfully wrote to characteristic %s", characteristic_uuid)
             return True
+            
+        except asyncio.TimeoutError:
+            _LOGGER.error("Write characteristic timed out for %s", characteristic_uuid)
+            return False
         except Exception as e:
-            print(f"Write characteristic failed for {characteristic_uuid}: {e}")
+            error_msg = str(e).lower()
+            if "connection" in error_msg or "disconnected" in error_msg:
+                _LOGGER.error("Connection lost during write to characteristic %s: %s", characteristic_uuid, e)
+                # Mark device as disconnected
+                for address, conn in self.connections.items():
+                    if conn == client:
+                        self.set_device_connection_state(address, self.STATE_DISCONNECTED)
+                        break
+            else:
+                _LOGGER.error("Write characteristic failed for %s: %s", characteristic_uuid, e)
             return False
 
-    def write_bt_gatt_characteristic_with_encryption(self, mac: str, service_uuid: str, characteristic_uuid: str,
-                                                   bluetooth_gatt: BleakClient, bluetooth_gatt_characteristic,
-                                                   bundle: dict):
+    async def write_bt_gatt_characteristic_with_encryption_async(self, mac: str, service_uuid: str, characteristic_uuid: str,
+                                                               bluetooth_gatt: BleakClient, bluetooth_gatt_characteristic,
+                                                               bundle: dict):
         """
-        Write BT GATT Characteristic with encryption handling - Python port of Java WriteBTGattCharacteristic
+        Write BT GATT Characteristic with encryption handling - Enhanced async version with connection monitoring
         Handles specific characteristic UUIDs with their respective encryption/data processing logic
         """
         try:
+            # Check connection status before processing
+            if not bluetooth_gatt.is_connected:
+                _LOGGER.error("Cannot write to characteristic %s: Device %s not connected", characteristic_uuid, mac)
+                return False
+            
             data_to_write = None
             
             if characteristic_uuid.lower() == "f1110022-0190-4567-8fab-4d4158a4eeaf":
@@ -309,28 +342,35 @@ class KubeBtClient:
                     else:
                         data_to_write = str(characteristic_value).encode('utf-8')
             
-            # Write the characteristic
+            # Write the characteristic with proper error handling
             if data_to_write is not None:
-                success = asyncio.create_task(self.write_characteristic_async(bluetooth_gatt, service_uuid, 
-                                                 characteristic_uuid, data_to_write))
-                # Note: This is now async, so we can't check success immediately
-                # The error handling would need to be moved to the async context
-                # else:
-                    # Set up timeout for command characteristic
-                    # if characteristic_uuid.lower() == "f1110022-0190-4567-8fab-4d4158a4eeaf":
-                        # device = self.get_kube_device(mac)
-                        # timeout_runnable = device.get_write_char_timeout_runnable()
-                        # if timeout_runnable:
-                        #     self.delayed_command_handler.post_delayed(timeout_runnable, 4000)
+                success = await self.write_characteristic_async(bluetooth_gatt, service_uuid, 
+                                                               characteristic_uuid, data_to_write)
+                if not success:
+                    _LOGGER.error("Failed to write to characteristic %s for device %s", characteristic_uuid, mac)
+                    bundle["errorCode"] = "error_write_characteristic"
+                    self.handle_error(mac, self.get_devices_first_payload_group_identifier(mac),
+                                    self.get_first_payload_group_class(mac), 
+                                    self.get_kube_device(mac), bundle)
+                    return False
+                
+                # Set up timeout for command characteristic if needed
+                if characteristic_uuid.lower() == "f1110022-0190-4567-8fab-4d4158a4eeaf":
+                    # Add a small delay to allow the write to complete
+                    await asyncio.sleep(0.1)
+                
+                return True
             else:
-                print(f"No data to write for characteristic {characteristic_uuid}")
+                _LOGGER.warning("No data to write for characteristic %s", characteristic_uuid)
+                return False
                 
         except Exception as e:
-            print(f"Error in write_bt_gatt_characteristic_with_encryption: {e}")
+            _LOGGER.error("Error in write_bt_gatt_characteristic_with_encryption_async: %s", e)
             bundle["errorCode"] = "error_write_characteristic"
             self.handle_error(mac, self.get_devices_first_payload_group_identifier(mac),
                             self.get_first_payload_group_class(mac), 
                             self.get_kube_device(mac), bundle)
+            return False
     
     async def start_notify_async(self, client: BleakClient, characteristic_uuid: str, 
                                 callback: Any) -> bool:

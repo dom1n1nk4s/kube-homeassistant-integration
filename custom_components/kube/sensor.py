@@ -231,4 +231,5 @@ class KubeMaintenanceSensor(CoordinatorEntity, SensorEntity):
     @property
     def available(self) -> bool:
         """Return if entity is available."""
-        return self.coordinator.is_connected
+        # For connect-per-command pattern, sensors are available if we have coordinator data
+        return bool(self.coordinator.data)

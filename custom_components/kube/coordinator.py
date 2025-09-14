@@ -40,11 +40,12 @@ class KubeDataUpdateCoordinator(DataUpdateCoordinator):
         self._last_operation_result = None
         self._connection_state = 0
 
+        # Disable automatic polling - we'll fetch data on-demand only
         super().__init__(
             hass,
             _LOGGER,
             name=DOMAIN,
-            update_interval=timedelta(seconds=DEFAULT_UPDATE_INTERVAL),
+            update_interval=None,  # No automatic updates
         )
 
     @property
@@ -64,14 +65,18 @@ class KubeDataUpdateCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self) -> dict[str, Any]:
         """Update data via library using async methods."""
         try:
-            # Get device status using new async method
+            # For connect-per-command pattern, we test connectivity by attempting to get status
+            _LOGGER.debug("Attempting to get device status for %s", self.mac_address)
             device_info = await self.kube_commands.get_device_status_async()
             
-            # Check if we got any data (indicates successful connection)
-            is_connected = bool(device_info)
+            # Check if we got any meaningful data (indicates successful connection)
+            is_connected = bool(device_info and len(device_info) > 0)
             connection_state = 2 if is_connected else 0  # 2 = connected, 0 = disconnected
             
             self._connection_state = connection_state
+            
+            _LOGGER.debug("Device %s status: connected=%s, info_keys=%s", 
+                         self.mac_address, is_connected, list(device_info.keys()) if device_info else [])
             
             return {
                 "connection_state": connection_state,
@@ -79,11 +84,13 @@ class KubeDataUpdateCoordinator(DataUpdateCoordinator):
                 "mac_address": self.mac_address,
                 "device_info": device_info,
                 "last_operation_result": self._last_operation_result,
+                "last_update": "success",
             }
 
         except Exception as err:
-            _LOGGER.error("Error communicating with KUBE device: %s", err)
-            # Set disconnected state on error
+            _LOGGER.warning("Error communicating with KUBE device %s: %s", self.mac_address, err)
+            # For connect-per-command, connection errors are expected during updates
+            # We'll still consider the device "available" for commands
             self._connection_state = 0
             return {
                 "connection_state": 0,
@@ -91,6 +98,8 @@ class KubeDataUpdateCoordinator(DataUpdateCoordinator):
                 "mac_address": self.mac_address,
                 "device_info": {},
                 "last_operation_result": self._last_operation_result,
+                "last_update": "failed",
+                "last_error": str(err),
             }
 
     async def async_execute_command(self, command_name: str, **kwargs) -> bool:
@@ -132,6 +141,58 @@ class KubeDataUpdateCoordinator(DataUpdateCoordinator):
                 "success": False,
             }
             return False
+
+    async def async_fetch_device_info(self) -> dict[str, Any]:
+        """Fetch device information on-demand for modal display."""
+        try:
+            _LOGGER.debug("Fetching device info on-demand for %s", self.mac_address)
+            
+            # Get fresh device status
+            device_info = await self.kube_commands.get_device_status_async()
+            
+            # Check if we got any meaningful data
+            is_connected = bool(device_info and len(device_info) > 0)
+            connection_state = 2 if is_connected else 0
+            
+            # Update internal state
+            self._connection_state = connection_state
+            
+            # Get the device object to access notifications
+            device = self.kube_commands.kube_bt_client.get_kube_device(self.mac_address)
+            
+            # Return comprehensive device information for modal
+            return {
+                "connection_state": connection_state,
+                "is_connected": is_connected,
+                "mac_address": self.mac_address,
+                "device_info": device_info or {},
+                "last_operation_result": self._last_operation_result,
+                "auth_method": self.auth_method,
+                "fetch_time": "success",
+                "device_name": f"KUBE Gate ({self.mac_address})",
+                "manufacturer": "KUBE",
+                "model": "Gate System",
+                "sw_version": "1.0",
+                "latest_notification": device.get_device_param_or_default("latest_notification", ""),
+                "notification_buffer": device.get_device_param_or_default("notification_buffer", ""),
+            }
+            
+        except Exception as err:
+            _LOGGER.warning("Error fetching device info for %s: %s", self.mac_address, err)
+            return {
+                "connection_state": 0,
+                "is_connected": False,
+                "mac_address": self.mac_address,
+                "device_info": {},
+                "last_operation_result": self._last_operation_result,
+                "auth_method": self.auth_method,
+                "fetch_time": "failed",
+                "fetch_error": str(err),
+                "device_name": f"KUBE Gate ({self.mac_address})",
+                "manufacturer": "KUBE",
+                "model": "Gate System",
+                "sw_version": "1.0",
+            }
 
     async def async_connect(self) -> bool:
         """Connect to the KUBE device using async method."""
