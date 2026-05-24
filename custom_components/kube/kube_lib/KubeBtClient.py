@@ -16,15 +16,15 @@ try:
     BLEAK_AVAILABLE = True
 except ImportError:
     BLEAK_AVAILABLE = False
-    print("Warning: bleak library not available. Install with: pip install bleak")
+    _LOGGER.warning("bleak library not available. Install with: pip install bleak")
 
 try:
     from bleak_retry_connector import establish_connection
     BLEAK_RETRY_AVAILABLE = True
 except ImportError:
     BLEAK_RETRY_AVAILABLE = False
-    print("Warning: bleak-retry-connector library not available. Install with: pip install bleak-retry-connector")
-    print("Connection reliability may be reduced without bleak-retry-connector")
+    _LOGGER.warning("bleak-retry-connector library not available. Install with: pip install bleak-retry-connector")
+    _LOGGER.warning("Connection reliability may be reduced without bleak-retry-connector")
 
 
 class DelayedCommandHandler:
@@ -93,14 +93,14 @@ class KubeBtClient:
             BleakClient instance if successful, crashes on failure
         """
         self.set_device_connection_state(address, self.STATE_CONNECTING)
-        print(f"Attempting to connect to {address} with {connection_timeout/1000}s timeout...")
+        _LOGGER.info("Attempting to connect to %s with %ss timeout...", address, connection_timeout/1000)
         
         # Use bleak-retry-connector for more reliable connection establishment if available
         if BLEAK_RETRY_AVAILABLE:
-            print(f"Using bleak-retry-connector for reliable connection to {address}")
+            _LOGGER.info("Using bleak-retry-connector for reliable connection to %s", address)
             try:
                 # First scan for the device to get BLEDevice object
-                print(f"Scanning for device {address}...")
+                _LOGGER.info("Scanning for device %s...", address)
                 device = await BleakScanner.find_device_by_address(
                     address, 
                     timeout=connection_timeout / 1000.0
@@ -109,7 +109,7 @@ class KubeBtClient:
                 if device is None:
                     raise RuntimeError(f"Bluetooth device {address} not found during scan!")
                 
-                print(f"Found device: {device.name or 'Unknown'} ({device.address})")
+                _LOGGER.info("Found device: %s (%s)", device.name or 'Unknown', device.address)
                 
                 # Now establish connection with the BLEDevice object
                 client = await establish_connection(
@@ -120,11 +120,11 @@ class KubeBtClient:
                 )
             except Exception as e:
                 self.set_device_connection_state(address, self.STATE_DISCONNECTED)
-                print(f"FATAL ERROR: Bluetooth device {address} connection failed with bleak-retry-connector: {e}")
+                _LOGGER.error("Bluetooth device %s connection failed with bleak-retry-connector: %s", address, e)
                 raise RuntimeError(f"Bluetooth device {address} not found or connection failed!")
         else:
             # Fallback to standard BleakClient connection
-            print(f"Warning: Using standard BleakClient.connect() without retry logic")
+            _LOGGER.warning("Using standard BleakClient.connect() without retry logic")
             client = BleakClient(address, timeout=connection_timeout / 1000.0)
             await client.connect()
         
@@ -134,11 +134,11 @@ class KubeBtClient:
             device = self.get_kube_device(address)
             device.set_bluetooth_gatt(client)
             
-            print(f"Successfully connected to {address}")
+            _LOGGER.info("Successfully connected to %s", address)
             return client
         else:
             self.set_device_connection_state(address, self.STATE_DISCONNECTED)
-            print(f"FATAL ERROR: Bluetooth device {address} not found or connection failed!")
+            _LOGGER.error("Bluetooth device %s not found or connection failed!", address)
             raise RuntimeError(f"Bluetooth device {address} not found or connection failed!")
     
     
@@ -160,7 +160,7 @@ class KubeBtClient:
             device.set_bluetooth_gatt(None)
             
         except Exception as e:
-            print(f"Disconnect failed for {address}: {e}")
+            _LOGGER.error("Disconnect failed for %s: %s", address, e)
     
     async def discover_services_async(self, client: BleakClient) -> bool:
         """Discover services asynchronously"""
@@ -169,10 +169,10 @@ class KubeBtClient:
             # We can trigger a refresh if needed
             services = client.services
             service_count = len(list(services))
-            print(f"Service discovery found {service_count} services")
+            _LOGGER.info("Service discovery found %s services", service_count)
             return service_count > 0
         except Exception as e:
-            print(f"Service discovery failed: {e}")
+            _LOGGER.error("Service discovery failed: %s", e)
             return False
     
     def format_data_output(self, data: bytes, operation: str, uuid: str) -> str:
@@ -205,12 +205,12 @@ class KubeBtClient:
         try:
             value = await client.read_gatt_char(characteristic_uuid)
             if value:
-                print(f"[READ] {self.format_data_output(value, 'READ DATA', characteristic_uuid)}")
+                _LOGGER.debug("[READ] %s", self.format_data_output(value, 'READ DATA', characteristic_uuid))
             else:
-                print(f"[READ] READ DATA from {characteristic_uuid}: None")
+                _LOGGER.debug("[READ] READ DATA from %s: None", characteristic_uuid)
             return value
         except Exception as e:
-            print(f"Read characteristic failed for {characteristic_uuid}: {e}")
+            _LOGGER.error("Read characteristic failed for %s: %s", characteristic_uuid, e)
             return None
     
     
@@ -287,7 +287,7 @@ class KubeBtClient:
                 if token:
                     data_to_write = token
                 else:
-                    print("WARNING TOKEN IS EMPTY------------------------")
+                    _LOGGER.warning("TOKEN IS EMPTY------------------------")
                     
             elif characteristic_uuid.lower() == "f1170007-0190-4567-8fab-4d4158a4eeaf":
                 # Master key characteristic - complex encryption logic
@@ -347,7 +347,7 @@ class KubeBtClient:
                             enckey1 = self.encrypt_data(passkey, sn_bytes)
                             device.put_device_param_bytes("enckey1", enckey1)
                         except Exception as e:
-                            print(f"Error generating enckey1: {e}")
+                            _LOGGER.error("Error generating enckey1: %s", e)
                     else:
                         # Passkey already set - return error
                         bundle["errorCode"] = "error_masterkey"
@@ -404,7 +404,7 @@ class KubeBtClient:
             await client.start_notify(characteristic_uuid, callback)
             return True
         except Exception as e:
-            print(f"Start notify failed for {characteristic_uuid}: {e}")
+            _LOGGER.error("Start notify failed for %s: %s", characteristic_uuid, e)
             return False
     
     async def stop_notify_async(self, client: BleakClient, characteristic_uuid: str) -> bool:
@@ -413,7 +413,7 @@ class KubeBtClient:
             await client.stop_notify(characteristic_uuid)
             return True
         except Exception as e:
-            print(f"Stop notify failed for {characteristic_uuid}: {e}")
+            _LOGGER.error("Stop notify failed for %s: %s", characteristic_uuid, e)
             return False
       
     def write_bt_gatt_characteristic(self, address: str, service_uuid: str, 
@@ -439,7 +439,7 @@ class KubeBtClient:
         
         # This method needs to be converted to async or removed since write_characteristic no longer exists
         asyncio.create_task(self.write_characteristic_async(client, service_uuid, characteristic_uuid, data))
-        print(f"Initiated write to characteristic {characteristic_uuid}: {data.hex() if data else '(empty)'}")
+        _LOGGER.debug("Initiated write to characteristic %s: %s", characteristic_uuid, data.hex() if data else '(empty)')
     
     def set_indic_bt_gatt(self, address: str, service_uuid: str, characteristic_uuid: str,
                          client: BleakClient, characteristic, bundle: dict):
@@ -456,7 +456,7 @@ class KubeBtClient:
             self.cipher_helper_xor_byte_arrays(data, XORedResult, device.get_device_param_bytes("enckey2"))
             
             # Enhanced notification handling with proper buffering
-            print(f"[NOTIFY] {self.format_data_output(XORedResult, 'NOTIFICATION FRAGMENT', characteristic_uuid)}")
+            _LOGGER.debug("[NOTIFY] %s", self.format_data_output(XORedResult, 'NOTIFICATION FRAGMENT', characteristic_uuid))
             
             # Append to notification buffer
             device.append_device_param_bytes(f"notify_{characteristic_uuid}", XORedResult)
@@ -479,7 +479,7 @@ class KubeBtClient:
                 
                 # If we found complete messages, process them
                 if complete_messages:
-                    print(f"[NOTIFY] Found {len(complete_messages)} complete message(s)")
+                    _LOGGER.debug("[NOTIFY] Found %s complete message(s)", len(complete_messages))
                     
                     # Get existing message queue or create new one
                     message_queue_key = f"message_queue_{characteristic_uuid}"
@@ -492,7 +492,7 @@ class KubeBtClient:
                         existing_queue = existing_queue_data
                     
                     for i, message in enumerate(complete_messages):
-                        print(f"[NOTIFY] Complete Message {i+1}: {message}")
+                        _LOGGER.debug("[NOTIFY] Complete Message %s: %s", i+1, message)
                         
                         # Add message to queue with timestamp
                         import time
@@ -502,7 +502,7 @@ class KubeBtClient:
                             "sequence": len(existing_queue) + 1
                         }
                         existing_queue.append(message_entry)
-                        print(f"[NOTIFY] Added message to queue (sequence #{message_entry['sequence']})")
+                        _LOGGER.debug("[NOTIFY] Added message to queue (sequence #%s)", message_entry['sequence'])
                     
                     # Store updated message queue as a list in device params
                     device.device_params[message_queue_key] = existing_queue
@@ -511,18 +511,18 @@ class KubeBtClient:
                     if complete_messages:
                         latest_message_key = f"latest_message_{characteristic_uuid}"
                         device.store_string_value(latest_message_key, complete_messages[-1])
-                        print(f"[NOTIFY] Updated latest message: {latest_message_key}")
+                        _LOGGER.debug("[NOTIFY] Updated latest message: %s", latest_message_key)
                     
                     # Store only the remaining incomplete data
                     if remaining_data:
                         device.put_device_param_bytes(f"notify_{characteristic_uuid}", remaining_data.encode('utf-8'))
-                        print(f"[NOTIFY] Buffering incomplete data: {remaining_data}")
+                        _LOGGER.debug("[NOTIFY] Buffering incomplete data: %s", remaining_data)
                     else:
                         # Clear the buffer if no remaining data
                         device.put_device_param_bytes(f"notify_{characteristic_uuid}", b'')
                         
             except Exception as e:
-                print(f"[NOTIFY] Error processing notification data: {e}")
+                _LOGGER.error("[NOTIFY] Error processing notification data: %s", e)
         
         # First, set characteristic notification (equivalent to bluetoothGatt.setCharacteristicNotification)
         if is_enabled:
@@ -585,24 +585,24 @@ class KubeBtClient:
             # In bleak, we need to access descriptors through the characteristic
             service = client.services.get_service(service_uuid)
             if not service:
-                print(f"Service {service_uuid} not found")
+                _LOGGER.warning("Service %s not found", service_uuid)
                 return None
             
             characteristic = service.get_characteristic(characteristic_uuid)
             if not characteristic:
-                print(f"Characteristic {characteristic_uuid} not found")
+                _LOGGER.warning("Characteristic %s not found", characteristic_uuid)
                 return None
             
             descriptor = characteristic.get_descriptor(desc_uuid)
             if not descriptor:
-                print(f"Descriptor {desc_uuid} not found")
+                _LOGGER.warning("Descriptor %s not found", desc_uuid)
                 return None
             
             # Read the descriptor value
             value = await client.read_gatt_descriptor(descriptor.handle)
             return value
         except Exception as e:
-            print(f"Read descriptor failed for {desc_uuid}: {e}")
+            _LOGGER.error("Read descriptor failed for %s: %s", desc_uuid, e)
             return None
     
     def read_desc_bt_gatt(self, address: str, service_uuid: str, characteristic_uuid: str,
@@ -612,15 +612,15 @@ class KubeBtClient:
         
         async def execute_read():
             try:
-                print(f"Executing read for descriptor {desc_uuid}")
+                _LOGGER.debug("Executing read for descriptor %s", desc_uuid)
                 data = await self.read_descriptor_async(client, service_uuid, characteristic_uuid, desc_uuid)
                 if data is not None:
                     device.put_device_param_bytes(f"read_desc_{desc_uuid}", data)
-                    print(f"[READ] {self.format_data_output(data, 'READ DESCRIPTOR', desc_uuid)}")
+                    _LOGGER.debug("[READ] %s", self.format_data_output(data, 'READ DESCRIPTOR', desc_uuid))
                 else:
-                    print(f"Failed to read descriptor {desc_uuid}")
+                    _LOGGER.error("Failed to read descriptor %s", desc_uuid)
             except Exception as e:
-                print(f"Error reading descriptor {desc_uuid}: {e}")
+                _LOGGER.error("Error reading descriptor %s: %s", desc_uuid, e)
         
         # Execute read operation asynchronously to avoid blocking
         self.delayed_command_handler.post(execute_read)
@@ -632,25 +632,25 @@ class KubeBtClient:
             # In bleak, we need to access descriptors through the characteristic
             service = client.services.get_service(service_uuid)
             if not service:
-                print(f"Service {service_uuid} not found")
+                _LOGGER.warning("Service %s not found", service_uuid)
                 return False
             
             characteristic = service.get_characteristic(characteristic_uuid)
             if not characteristic:
-                print(f"Characteristic {characteristic_uuid} not found")
+                _LOGGER.warning("Characteristic %s not found", characteristic_uuid)
                 return False
             
             descriptor = characteristic.get_descriptor(desc_uuid)
             if not descriptor:
-                print(f"Descriptor {desc_uuid} not found")
+                _LOGGER.warning("Descriptor %s not found", desc_uuid)
                 return False
             
             # Write the descriptor value
-            print(f"[WRITE] WRITE DESCRIPTOR to {desc_uuid}: {data.hex()}")
+            _LOGGER.debug("[WRITE] WRITE DESCRIPTOR to %s: %s", desc_uuid, data.hex())
             await client.write_gatt_descriptor(descriptor.handle, data)
             return True
         except Exception as e:
-            print(f"Write descriptor failed for {desc_uuid}: {e}")
+            _LOGGER.error("Write descriptor failed for %s: %s", desc_uuid, e)
             return False
     
     def write_bluetooth_gatt_descriptor(self, address: str, service_uuid: str, 
@@ -661,7 +661,7 @@ class KubeBtClient:
         
         async def execute_write():
             try:
-                print(f"Executing write for descriptor {desc_uuid}")
+                _LOGGER.debug("Executing write for descriptor %s", desc_uuid)
                 
                 # Extract data from bundle
                 data = None
@@ -672,14 +672,14 @@ class KubeBtClient:
                 if data is not None:
                     success = await self.write_descriptor_async(client, service_uuid, characteristic_uuid, desc_uuid, data)
                     if success:
-                        print(f"Wrote to descriptor {desc_uuid}: {data.hex()}")
+                        _LOGGER.debug("Wrote to descriptor %s: %s", desc_uuid, data.hex())
                     else:
-                        print(f"Failed to write to descriptor {desc_uuid}")
+                        _LOGGER.error("Failed to write to descriptor %s", desc_uuid)
                 else:
-                    print(f"No data to write for descriptor {desc_uuid}")
+                    _LOGGER.warning("No data to write for descriptor %s", desc_uuid)
                     
             except Exception as e:
-                print(f"Error writing descriptor {desc_uuid}: {e}")
+                _LOGGER.error("Error writing descriptor %s: %s", desc_uuid, e)
         
         # Execute write operation asynchronously to avoid blocking
         self.delayed_command_handler.post(execute_write)
@@ -711,7 +711,7 @@ class KubeBtClient:
             self.notification_callbacks.clear()
                 
         except Exception as e:
-            print(f"Error during cleanup: {e}")
+            _LOGGER.error("Error during cleanup: %s", e)
     
     # Bluetooth response handling methods (converted from Java)
     
@@ -754,7 +754,7 @@ class KubeBtClient:
                 
             except UnicodeDecodeError as e:
                 # Not UTF-8 strings, use original byte padding logic
-                print(f"Warning: Input not UTF-8 decodable, using byte padding: {e}")
+                _LOGGER.warning("Input not UTF-8 decodable, using byte padding: %s", e)
                 if len(unpadded_key) > 16:
                     key = unpadded_key[:16]
                 else:
@@ -774,18 +774,18 @@ class KubeBtClient:
             return encrypted
             
         except ImportError:
-            print("FATAL ERROR: cryptography library not available. Install with: pip install cryptography")
+            _LOGGER.error("cryptography library not available. Install with: pip install cryptography")
             import sys
             sys.exit(1)
         except Exception as e:
-            print(f"FATAL ERROR in AES encryption: {e}")
+            _LOGGER.error("FATAL ERROR in AES encryption: %s", e)
             import sys
             sys.exit(1)
     
     def handle_error(self, device_address: str, group_identifier: int, group_class: int,
                     kube_device, bundle: dict):
         """Handle error"""
-        print(f"Error for device {device_address}: {bundle}")
+        _LOGGER.error("Error for device %s: %s", device_address, bundle)
         # This would be where you'd handle the actual error processing
         # For now, just log the error
     

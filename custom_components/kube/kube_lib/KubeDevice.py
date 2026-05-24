@@ -1,5 +1,8 @@
+import logging
 from typing import Any, Optional
 from .BluetoothPayload import BluetoothPayload
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class KubeDevice:
@@ -45,7 +48,7 @@ class KubeDevice:
         
     def remove_and_retrieve_first_payload(self) -> Optional[BluetoothPayload]:
         if not self.payload_queue:
-            print("FATAL ERROR: Attempted to remove payload from empty queue!")
+            _LOGGER.error("Attempted to remove payload from empty queue!")
             raise RuntimeError("Payload queue is empty - cannot remove payload")
         return self.payload_queue.pop(0)
         
@@ -102,7 +105,7 @@ class KubeDevice:
         # We need access to KubeBtClient for operations
         # This will be injected when needed
         if not hasattr(self, 'kube_bt_client') or self.kube_bt_client is None:
-            print("FATAL ERROR: KubeBtClient not available for payload processing")
+            _LOGGER.error("KubeBtClient not available for payload processing")
             raise RuntimeError("KubeBtClient not available for payload processing")
         
         # Set the current address from the payload
@@ -145,7 +148,7 @@ class KubeDevice:
                 service_uuid = payload.get_service_uuid()
                 return self.bluetooth_gatt.services.get_service(service_uuid)
             except Exception as e:
-                print(f"Error getting service {payload.get_service_uuid()}: {e}")
+                _LOGGER.error("Error getting service %s: %s", payload.get_service_uuid(), e)
                 return None
         return None
 
@@ -156,7 +159,7 @@ class KubeDevice:
                 characteristic_uuid = payload.get_characteristic_uuid()
                 return service.get_characteristic(characteristic_uuid)
             except Exception as e:
-                print(f"Error getting characteristic {payload.get_characteristic_uuid()}: {e}")
+                _LOGGER.error("Error getting characteristic %s: %s", payload.get_characteristic_uuid(), e)
                 return None
         return None
 
@@ -175,15 +178,15 @@ class KubeDevice:
             )
             if self.bluetooth_gatt is not None:
                 self.store_int_value("client_link_state", 4)
-                print(f"Successfully connected to {self.address}")
+                _LOGGER.info("Successfully connected to %s", self.address)
                 # Continue with next command
                 self.kube_bt_client.delayed_command_handler.post(self._create_command_done_runnable())
             else:
-                print(f"Failed to connect to {self.address}")
+                _LOGGER.error("Failed to connect to %s", self.address)
                 self.report_error("error_connection_failed")
         elif connection_state == 2:
             # Already connected, process next command
-            print(f"Already connected to {self.address}")
+            _LOGGER.info("Already connected to %s", self.address)
             self.kube_bt_client.delayed_command_handler.post(self._create_command_done_runnable())
         else:
             self.report_error("error_connection_state")
@@ -199,7 +202,7 @@ class KubeDevice:
             if not success:
                 self.report_error("error_discover_services")
             else:
-                print("Service discovery completed successfully")
+                _LOGGER.info("Service discovery completed successfully")
                 # Continue with next command
                 self.kube_bt_client.delayed_command_handler.post(self._create_command_done_runnable())
 
@@ -225,14 +228,14 @@ class KubeDevice:
         elif self.bluetooth_gatt is None:
             self.report_error("error_connection")
         else:
-            print(f"Reading characteristic {payload.get_characteristic_uuid()}")
+            _LOGGER.debug("Reading characteristic %s", payload.get_characteristic_uuid())
             
             # Define callback to continue processing after read completes
             def read_callback(success, data):
                 if success:
-                    print(f"Read operation completed successfully for {payload.get_characteristic_uuid()}")
+                    _LOGGER.debug("Read operation completed successfully for %s", payload.get_characteristic_uuid())
                 else:
-                    print(f"Read operation failed for {payload.get_characteristic_uuid()}")
+                    _LOGGER.error("Read operation failed for %s", payload.get_characteristic_uuid())
                 # do not continue, response will handle it
                 # self.kube_bt_client.delayed_command_handler.post(self._create_command_done_runnable())
             
@@ -257,7 +260,7 @@ class KubeDevice:
         elif self.bluetooth_gatt is None:
             self.report_error("error_connection")
         else:
-            print(f"Writing to characteristic {payload.get_characteristic_uuid()}")
+            _LOGGER.debug("Writing to characteristic %s", payload.get_characteristic_uuid())
             self.kube_bt_client.write_bt_gatt_characteristic_with_encryption(
                 self.address,
                 payload.get_service_uuid(),
@@ -280,7 +283,7 @@ class KubeDevice:
         elif self.bluetooth_gatt is None:
             self.report_error("error_connection")
         else:
-            print(f"Setting indicator for characteristic {payload.get_characteristic_uuid()}")
+            _LOGGER.debug("Setting indicator for characteristic %s", payload.get_characteristic_uuid())
             self.kube_bt_client.set_indic_bt_gatt(
                 self.address,
                 payload.get_service_uuid(),
@@ -303,7 +306,7 @@ class KubeDevice:
         elif self.bluetooth_gatt is None:
             self.report_error("error_connection")
         else:
-            print(f"Reading descriptor {payload.get_desc_uuid()}")
+            _LOGGER.debug("Reading descriptor %s", payload.get_desc_uuid())
             try:
                 descriptor = None
                 if characteristic is not None:
@@ -320,7 +323,7 @@ class KubeDevice:
                 # reads have responses which need to continue the chain
                 # self.kube_bt_client.delayed_command_handler.post(self._create_command_done_runnable())
             except Exception as e:
-                print(f"Error in handle_read_descriptor: {e}")
+                _LOGGER.error("Error in handle_read_descriptor: %s", e)
                 # self.kube_bt_client.delayed_command_handler.post(self._create_command_done_runnable())
 
     def handle_write_descriptor(self, connection_state, payload, characteristic):
@@ -334,7 +337,7 @@ class KubeDevice:
         elif self.bluetooth_gatt is None:
             self.report_error("error_connection")
         else:
-            print(f"Writing descriptor {payload.get_desc_uuid()}")
+            _LOGGER.debug("Writing descriptor %s", payload.get_desc_uuid())
             try:
                 descriptor = None
                 if characteristic is not None:
@@ -352,7 +355,7 @@ class KubeDevice:
                 # Continue with next command
                 self.kube_bt_client.delayed_command_handler.post(self._create_command_done_runnable())
             except Exception as e:
-                print(f"Error in handle_write_descriptor: {e}")
+                _LOGGER.error("Error in handle_write_descriptor: %s", e)
                 # Continue with next command even on error
                 self.kube_bt_client.delayed_command_handler.post(self._create_command_done_runnable())
 
@@ -371,17 +374,17 @@ class KubeDevice:
         error_bundle = {"errorCode": error_code}
         
         # CRASH THE APPLICATION ON ANY ERROR
-        print(f"FATAL ERROR: {error_code}")
-        print(f"Address: {self.address}")
+        _LOGGER.error("FATAL ERROR: %s", error_code)
+        _LOGGER.error("Address: %s", self.address)
         
         if self.address is not None:
             group_identifier = self.kube_bt_client.get_devices_first_payload_group_identifier(self.address)
             group_class = self.kube_bt_client.get_first_payload_group_class(self.address)
-            print(f"Group Identifier: {group_identifier}")
-            print(f"Group Class: {group_class}")
-            print(f"Device: {self}")
+            _LOGGER.error("Group Identifier: %s", group_identifier)
+            _LOGGER.error("Group Class: %s", group_class)
+            _LOGGER.error("Device: %s", self)
         else:
-            print("No address available")
+            _LOGGER.error("No address available")
         
         # CRASH THE APPLICATION
         raise RuntimeError(f"FATAL ERROR: {error_code} - Application terminating")
