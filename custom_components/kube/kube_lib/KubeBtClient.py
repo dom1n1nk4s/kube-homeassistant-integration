@@ -18,6 +18,14 @@ except ImportError:
     BLEAK_AVAILABLE = False
     print("Warning: bleak library not available. Install with: pip install bleak")
 
+try:
+    from bleak_retry_connector import establish_connection
+    BLEAK_RETRY_AVAILABLE = True
+except ImportError:
+    BLEAK_RETRY_AVAILABLE = False
+    print("Warning: bleak-retry-connector library not available. Install with: pip install bleak-retry-connector")
+    print("Connection reliability may be reduced without bleak-retry-connector")
+
 
 class DelayedCommandHandler:
     """Handles delayed command execution using asyncio"""
@@ -74,7 +82,7 @@ class KubeBtClient:
     async def connect_bt_gatt_async(self, address: str, use_background_connection: bool = False, 
                                    connection_timeout: int = 30000) -> Optional[BleakClient]:
         """
-        Connect to GATT server asynchronously
+        Connect to GATT server asynchronously with retry logic for improved reliability.
         
         Args:
             address: Bluetooth device address
@@ -87,27 +95,44 @@ class KubeBtClient:
         self.set_device_connection_state(address, self.STATE_CONNECTING)
         print(f"Attempting to connect to {address} with {connection_timeout/1000}s timeout...")
         
-        client = BleakClient(address, timeout=connection_timeout / 1000.0)
-        await client.connect()
+        # Use bleak-retry-connector for more reliable connection establishment if available
+        if BLEAK_RETRY_AVAILABLE:
+            print(f"Using bleak-retry-connector for reliable connection to {address}")
+            try:
+                # First scan for the device to get BLEDevice object
+                print(f"Scanning for device {address}...")
+                device = await BleakScanner.find_device_by_address(
+                    address, 
+                    timeout=connection_timeout / 1000.0
+                )
+                
+                if device is None:
+                    raise RuntimeError(f"Bluetooth device {address} not found during scan!")
+                
+                print(f"Found device: {device.name or 'Unknown'} ({device.address})")
+                
+                # Now establish connection with the BLEDevice object
+                client = await establish_connection(
+                    BleakClient,
+                    device,
+                    device.name or address,  # name parameter
+                    timeout=connection_timeout / 1000.0
+                )
+            except Exception as e:
+                self.set_device_connection_state(address, self.STATE_DISCONNECTED)
+                print(f"FATAL ERROR: Bluetooth device {address} connection failed with bleak-retry-connector: {e}")
+                raise RuntimeError(f"Bluetooth device {address} not found or connection failed!")
+        else:
+            # Fallback to standard BleakClient connection
+            print(f"Warning: Using standard BleakClient.connect() without retry logic")
+            client = BleakClient(address, timeout=connection_timeout / 1000.0)
+            await client.connect()
         
         if client.is_connected:
             self.connections[address] = client
             self.set_device_connection_state(address, self.STATE_CONNECTED)
             device = self.get_kube_device(address)
             device.set_bluetooth_gatt(client)
-            
-            # Log MTU size for debugging notification issues
-            try:
-                # Try to get MTU size - bleak may have this attribute on some platforms
-                mtu_size = getattr(client, 'mtu_size', None)
-                if mtu_size:
-                    print(f"Connected to {address} - MTU size: {mtu_size} bytes")
-                else:
-                    print(f"Connected to {address} - MTU size: Default (~23 bytes)")
-                    print("  Note: Large JSON messages may be fragmented across multiple notifications")
-                    
-            except Exception as e:
-                print(f"Could not determine MTU size: {e}")
             
             print(f"Successfully connected to {address}")
             return client

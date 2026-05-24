@@ -21,6 +21,7 @@ PLATFORMS: list[Platform] = [
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up KUBE Gate System from a config entry."""
+    _LOGGER.setLevel(logging.DEBUG)
     _LOGGER.debug("Setting up KUBE integration for entry: %s", entry.entry_id)
 
     # Create the coordinator
