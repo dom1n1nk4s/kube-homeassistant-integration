@@ -350,8 +350,6 @@ class KubeCommands:
                 token = bytearray(len(nonce_xor_enckey1))
                 self.kube_bt_client.cipher_helper_xor_byte_arrays(bytes(nonce_xor_enckey1), token, enckey2)
                 device.put_device_param_bytes("token", bytes(token))
-                
-            
         except Exception as e:
             _LOGGER.error("Error processing nonce for device %s: %s", self.mac, e)
     
@@ -407,6 +405,9 @@ class KubeCommands:
         """
         Send a command to the device using connect-per-command pattern.
         
+        This method writes the command in 16-byte intervals to match the behavior
+        of the original Java implementation's add_write_characteristic_payload.
+        
         Args:
             command: Command string to send
             
@@ -424,28 +425,47 @@ class KubeCommands:
                 _LOGGER.error("No client connection found for device %s after authentication", self.mac)
                 return False
             
-            # Encrypt and send command
+            # Encrypt and send command in 16-byte chunks
             device = self.kube_bt_client.get_kube_device(self.mac)
             enckey2 = device.get_device_param_bytes("enckey2")
             
             if enckey2:
                 cmd_bytes = command.encode('utf-8')
-                encrypted_cmd = bytearray(len(cmd_bytes))
-                self.kube_bt_client.cipher_helper_xor_byte_arrays(cmd_bytes, encrypted_cmd, enckey2)
                 
-                success = await self.kube_bt_client.write_characteristic_async(
-                    client,
-                    "f1110020-0190-4567-8fab-4d4158a4eeaf",
-                    "f1110022-0190-4567-8fab-4d4158a4eeaf",
-                    bytes(encrypted_cmd)
-                )
+                # Write command in 16-byte intervals (matching PayloadBuilder.add_write_characteristic_payload)
+                byte_index = 0
+                total_length = len(cmd_bytes)
                 
-                if success:
-                    # Wait for response
-                    await asyncio.sleep(1)
-                    return True
-                else:
-                    _LOGGER.warning("Failed to write command '%s' to device %s", command, self.mac)
+                while byte_index < total_length:
+                    # Get 16-byte chunk (or remaining bytes if less than 16)
+                    end_index = min(byte_index + 16, total_length)
+                    chunk = cmd_bytes[byte_index:end_index]
+                    
+                    # Encrypt this chunk
+                    encrypted_chunk = bytearray(len(chunk))
+                    self.kube_bt_client.cipher_helper_xor_byte_arrays(chunk, encrypted_chunk, enckey2)
+                    
+                    # Write this chunk
+                    success = await self.kube_bt_client.write_characteristic_async(
+                        client,
+                        "f1110020-0190-4567-8fab-4d4158a4eeaf",
+                        "f1110022-0190-4567-8fab-4d4158a4eeaf",
+                        bytes(encrypted_chunk)
+                    )
+                    
+                    if not success:
+                        _LOGGER.warning("Failed to write chunk at byte %d to device %s", byte_index, self.mac)
+                        return False
+                    
+                    # Small delay between chunks to ensure proper transmission
+                    if end_index < total_length:
+                        await asyncio.sleep(0.05)  # 50ms delay between chunks
+                    
+                    byte_index = end_index
+                
+                # Wait for response after all chunks sent
+                await asyncio.sleep(1)
+                return True
             else:
                 _LOGGER.error("No encryption key (enckey2) available for device %s", self.mac)
             
@@ -459,30 +479,31 @@ class KubeCommands:
             if client:
                 await self.kube_bt_client.disconnect_bt_gatt_async(self.mac, client)
     
+    @staticmethod
+    def _build_c30b_command(val: int) -> str:
+        cmd = f"@FFFFcact={{\"cmd\":\"C30B\",\"val\":{val}}}#"
+        content_len = len(cmd) - 2 - 4
+        return cmd.replace("FFFF", f"{content_len:04X}", 1)
+
     async def open_door_async(self) -> bool:
         """Open the door asynchronously."""
-        cmd = '@0028cact={"cmd":"C30B","val":1}#'
-        return await self._send_command_async(cmd)
+        return await self._send_command_async(self._build_c30b_command(1))
     
     async def close_door_async(self) -> bool:
         """Close the door asynchronously."""
-        cmd = '@0028cact={"cmd":"C30B","val":4}#'
-        return await self._send_command_async(cmd)
+        return await self._send_command_async(self._build_c30b_command(4))
     
     async def toggle_door_async(self) -> bool:
         """Toggle the door asynchronously."""
-        cmd = '@0028cact={"cmd":"C30B","val":8}#'
-        return await self._send_command_async(cmd)
+        return await self._send_command_async(self._build_c30b_command(8))
     
     async def open_slightly_async(self) -> bool:
         """Open slightly asynchronously."""
-        cmd = '@0030cact={"cmd":"C30B","val":128}#'
-        return await self._send_command_async(cmd)
+        return await self._send_command_async(self._build_c30b_command(128))
     
     async def control_lights_async(self) -> bool:
         """Control lights asynchronously."""
-        cmd = '@0030cact={"cmd":"C30B","val":256}#'
-        return await self._send_command_async(cmd)
+        return await self._send_command_async(self._build_c30b_command(256))
     
     async def get_device_status_async(self) -> dict:
         """
@@ -505,7 +526,7 @@ class KubeCommands:
             
             # Send status request commands
             commands = [
-                '@0005kbinf#',  # Basic info
+                # '@0005kbinf#',  # Basic info # commented as there is a bug preventing the second notification from being returned
                 '@0004cinf#',   # Configuration info
             ]
             
@@ -513,15 +534,37 @@ class KubeCommands:
                 enckey2 = device.get_device_param_bytes("enckey2")
                 if enckey2:
                     cmd_bytes = cmd.encode('utf-8')
-                    encrypted_cmd = bytearray(len(cmd_bytes))
-                    self.kube_bt_client.cipher_helper_xor_byte_arrays(cmd_bytes, encrypted_cmd, enckey2)
                     
-                    await self.kube_bt_client.write_characteristic_async(
-                        client,
-                        "f1110020-0190-4567-8fab-4d4158a4eeaf",
-                        "f1110022-0190-4567-8fab-4d4158a4eeaf",
-                        bytes(encrypted_cmd)
-                    )
+                    # Write command in 16-byte intervals (matching PayloadBuilder.add_write_characteristic_payload)
+                    byte_index = 0
+                    total_length = len(cmd_bytes)
+                    
+                    while byte_index < total_length:
+                        # Get 16-byte chunk (or remaining bytes if less than 16)
+                        end_index = min(byte_index + 16, total_length)
+                        chunk = cmd_bytes[byte_index:end_index]
+                        
+                        # Encrypt this chunk
+                        encrypted_chunk = bytearray(len(chunk))
+                        self.kube_bt_client.cipher_helper_xor_byte_arrays(chunk, encrypted_chunk, enckey2)
+                        
+                        # Write this chunk
+                        success = await self.kube_bt_client.write_characteristic_async(
+                            client,
+                            "f1110020-0190-4567-8fab-4d4158a4eeaf",
+                            "f1110022-0190-4567-8fab-4d4158a4eeaf",
+                            bytes(encrypted_chunk)
+                        )
+                        
+                        if not success:
+                            _LOGGER.warning("Failed to write chunk at byte %d to device %s", byte_index, self.mac)
+                            return {}
+                        
+                        # Small delay between chunks to ensure proper transmission
+                        if end_index < total_length:
+                            await asyncio.sleep(0.05)  # 50ms delay between chunks
+                        
+                        byte_index = end_index
                     
                     # Wait between commands
                     await asyncio.sleep(0.5)

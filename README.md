@@ -136,3 +136,9 @@ For issues and questions:
 1. Check the Home Assistant logs for error messages
 2. Verify your KUBE device compatibility
 3. Ensure proper Bluetooth connectivity
+
+## TODO
+
+1. make a proper status entry with actual DoorState parsed from response
+@015Bcinf={"cstate":17,"rstate":17,"cFFFF":"14A","cFFFD":" ","cFFFC":"00430045000D81564E45","cFFFB":"KAB-R13.0","cFFFA":"Rev 3.0","cFFF9":"OFA Rev 4.3","cFFF8":"00430045000D81564E45","cFFF6":"CEN14A","rFFFF":"RX4Y","rFFFE":"Radio receiver","rFFFC":"002B0024","rFFFB":"KAB-R13","rFFFA":"Rev 2.0","rFFF9":"RX4Y R2.4","rFFF8":"002B0024","rFFF6":"RADRX4Y"}#
+
