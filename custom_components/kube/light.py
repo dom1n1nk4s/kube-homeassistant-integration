@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
-from homeassistant.components.light import LightEntity
+from homeassistant.components.light import ColorMode, LightEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -14,12 +15,19 @@ from .const import (
     DOMAIN,
     ENTITY_GATE_LIGHTS,
     ATTR_MAC_ADDRESS,
-    ATTR_LAST_OPERATION,
-    ATTR_OPERATION_RESULT,
 )
 from .coordinator import KubeDataUpdateCoordinator
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _get_c76_value(notifications: list) -> int | None:
+    """Extract the full c76 value from a cpar notification response."""
+    for notification in notifications:
+        match = re.search(r'cpar=\{"c76":(\d+)\}#', notification)
+        if match:
+            return int(match.group(1))
+    return None
 
 
 async def async_setup_entry(
@@ -45,7 +53,8 @@ class KubeGateLight(CoordinatorEntity, LightEntity):
         super().__init__(coordinator)
         self._attr_unique_id = f"{coordinator.mac_address}_{ENTITY_GATE_LIGHTS}"
         self._attr_has_entity_name = True
-        self._is_on = False
+        self._attr_supported_color_modes = {ColorMode.ONOFF}
+        self._attr_color_mode = ColorMode.ONOFF
 
     @property
     def device_info(self) -> dict[str, Any]:
@@ -59,60 +68,63 @@ class KubeGateLight(CoordinatorEntity, LightEntity):
 
     @property
     def is_on(self) -> bool:
-        """Return true if light is on."""
-        # Since we can't read the actual light state from the device,
-        # we maintain our own state based on the last command
-        return self._is_on
+        """Return true if light is on based on c76.5 from device."""
+        if not self.coordinator.data or not self.coordinator.data.get("is_connected"):
+            return False
+
+        device_info = self.coordinator.data.get("device_info", {})
+        notifications = device_info.get("notifications", [])
+        if not isinstance(notifications, list):
+            return False
+
+        c76 = _get_c76_value(notifications)
+        if c76 is None:
+            return False
+
+        # c76.5 = bit 25 of c76 — manual activation of lights
+        return bool((c76 >> 25) & 0x1)
 
     @property
     def available(self) -> bool:
         """Return if entity is available."""
-        return self.coordinator.is_connected
+        return bool(self.coordinator.data)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return the state attributes."""
-        attrs = {
-            ATTR_MAC_ADDRESS: self.coordinator.mac_address,
-        }
-        
-        # Add last operation info if available
-        if self.coordinator.data and "last_operation_result" in self.coordinator.data:
-            last_op = self.coordinator.data["last_operation_result"]
-            if last_op and last_op.get("command") == "control_lights":
-                attrs[ATTR_LAST_OPERATION] = last_op.get("command")
-                attrs[ATTR_OPERATION_RESULT] = "success" if last_op.get("success") else "failed"
-        
-        return attrs
+        return {ATTR_MAC_ADDRESS: self.coordinator.mac_address}
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the light on."""
         _LOGGER.debug("Turning on gate lights")
-        
+
+        if self.is_on:
+            _LOGGER.debug("Gate lights already on")
+            return
+
         success = await self.coordinator.async_execute_command("control_lights")
-        
+
         if success:
-            self._is_on = True
-            self.async_write_ha_state()
-            _LOGGER.debug("Successfully turned on gate lights")
+            _LOGGER.debug("Successfully toggled gate lights on")
         else:
-            _LOGGER.error("Failed to turn on gate lights")
+            _LOGGER.error("Failed to toggle gate lights on")
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn the light off."""
         _LOGGER.debug("Turning off gate lights")
-        
-        # The KUBE system uses the same command to toggle lights
+
+        if not self.is_on:
+            _LOGGER.debug("Gate lights already off")
+            return
+
         success = await self.coordinator.async_execute_command("control_lights")
-        
+
         if success:
-            self._is_on = False
-            self.async_write_ha_state()
-            _LOGGER.debug("Successfully turned off gate lights")
+            _LOGGER.debug("Successfully toggled gate lights off")
         else:
-            _LOGGER.error("Failed to turn off gate lights")
+            _LOGGER.error("Failed to toggle gate lights off")
 
     @property
     def icon(self) -> str:
         """Return the icon for the light."""
-        return "mdi:lightbulb" if self._is_on else "mdi:lightbulb-outline"
+        return "mdi:lightbulb" if self.is_on else "mdi:lightbulb-outline"

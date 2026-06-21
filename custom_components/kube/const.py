@@ -31,7 +31,9 @@ ENTITY_DEVICE_INFO: Final = "device_info"
 ENTITY_GATE_LIGHTS: Final = "gate_lights"
 ENTITY_CONNECTION_STATUS: Final = "connection_status"
 ENTITY_GATE_STATE: Final = "gate_state"
-ENTITY_MAINTENANCE_INFO: Final = "maintenance_info"
+ENTITY_TOTAL_CYCLES: Final = "total_cycles"
+ENTITY_CYCLES_TO_MAINTENANCE: Final = "cycles_to_maintenance"
+
 
 # Service names
 SERVICE_OPEN_GATE: Final = "open_gate"

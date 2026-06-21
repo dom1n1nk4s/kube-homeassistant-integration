@@ -40,12 +40,11 @@ class KubeDataUpdateCoordinator(DataUpdateCoordinator):
         self._last_operation_result = None
         self._connection_state = 0
 
-        # Disable automatic polling - we'll fetch data on-demand only
         super().__init__(
             hass,
             _LOGGER,
             name=DOMAIN,
-            update_interval=None,  # No automatic updates
+            update_interval=timedelta(seconds=DEFAULT_UPDATE_INTERVAL),
         )
 
     @property
@@ -175,6 +174,7 @@ class KubeDataUpdateCoordinator(DataUpdateCoordinator):
                 "sw_version": "1.0",
                 "latest_notification": device.get_device_param_or_default("latest_notification", ""),
                 "notification_buffer": device.get_device_param_or_default("notification_buffer", ""),
+                "notification_list": device.get_device_param_or_default("notification_list", []),
             }
             
         except Exception as err:

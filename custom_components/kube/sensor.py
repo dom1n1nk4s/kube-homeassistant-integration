@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from homeassistant.components.sensor import SensorEntity, SensorDeviceClass
@@ -14,13 +15,67 @@ from .const import (
     DOMAIN,
     ENTITY_CONNECTION_STATUS,
     ENTITY_GATE_STATE,
-    ENTITY_MAINTENANCE_INFO,
+    ENTITY_TOTAL_CYCLES,
+    ENTITY_CYCLES_TO_MAINTENANCE,
     ATTR_MAC_ADDRESS,
     ATTR_CONNECTION_STATE,
 )
 from .coordinator import KubeDataUpdateCoordinator
 
 _LOGGER = logging.getLogger(__name__)
+
+# c77.1 door status descriptions (from Kube app resources.xml)
+C77_STATUS_DESC: dict[int, str] = {
+    0: "Door stopped",
+    1: "Opening",
+    2: "Open",
+    3: "Waiting reclosing timeout",
+    4: "Partial opening",
+    5: "Partial open reached",
+    6: "Waiting for partial reclosing",
+    7: "Closing",
+    8: "Closed",
+    9: "Partial closing",
+    10: "Photocell 1 activated while closing, reopening",
+    11: "Photocell 2 activated, movement stopped",
+    12: "Executed stop while opening",
+    13: "Executed stop while closing",
+    14: "Safety edge activated during movement",
+    15: "Leaf 1 impact with obstacle",
+    16: "Leaf 2 impact with obstacle",
+    17: "Leaf 1 impact with obstacle",
+    18: "Leaf 2 impact with obstacle",
+    19: "Photocells malfunction detected",
+    20: "Limit switch malfunction detected",
+    21: "Safety edge malfunction detected",
+    22: "Realignment, searching for limit switches",
+    23: "Power supply sag",
+    24: "Leaf 1 opening",
+    25: "Leaf 1 stop in opening",
+    26: "Leaf 2 opening",
+    27: "Leaf 1 and 2 stop in opening",
+    28: "Leaf 2 stop in opening",
+    29: "Leaf 1 closing",
+    30: "Leaf 2 closing",
+    31: "Leaf 2 stop in closing",
+    32: "Limit switch error: is leaf half open?",
+    33: "Error learning generic",
+    34: "Error learning, procedure stopped",
+    35: "Error learning abort",
+    36: "Error learning safety settings",
+    40: "Aeration opening",
+    41: "Stop in aeration",
+    42: "Waiting for aeration reclosing",
+}
+
+
+def _get_cpar_value(notifications: list, param: str) -> int | None:
+    """Extract a numeric value from a cpar notification response."""
+    for notification in notifications:
+        match = re.search(r'cpar=\{"' + re.escape(param) + r'":(\d+)\}#', notification)
+        if match:
+            return int(match.group(1))
+    return None
 
 
 async def async_setup_entry(
@@ -34,7 +89,8 @@ async def async_setup_entry(
     entities = [
         KubeConnectionSensor(coordinator),
         KubeGateStateSensor(coordinator),
-        KubeMaintenanceSensor(coordinator),
+        KubeTotalCyclesSensor(coordinator),
+        KubeCyclesToMaintenanceSensor(coordinator),
     ]
 
     async_add_entities(entities)
@@ -108,8 +164,6 @@ class KubeGateStateSensor(CoordinatorEntity, SensorEntity):
         super().__init__(coordinator)
         self._attr_unique_id = f"{coordinator.mac_address}_{ENTITY_GATE_STATE}"
         self._attr_has_entity_name = True
-        self._attr_device_class = SensorDeviceClass.ENUM
-        self._attr_options = ["unknown", "open", "closed", "opening", "closing", "partially_open"]
 
     @property
     def device_info(self) -> dict[str, Any]:
@@ -125,20 +179,21 @@ class KubeGateStateSensor(CoordinatorEntity, SensorEntity):
     def native_value(self) -> str:
         """Return the state of the sensor."""
         if not self.coordinator.data or not self.coordinator.data.get("is_connected"):
-            return "unknown"
-        
-        # Try to extract gate state from device info
+            return "Unknown"
+
         device_info = self.coordinator.data.get("device_info", {})
-        
-        # Look for gate state indicators in the device parameters
-        for key, value in device_info.items():
-            if "state" in key.lower() or "status" in key.lower():
-                # This is a placeholder - actual implementation would depend on
-                # what the KUBE device actually returns
-                if isinstance(value, str) and value:
-                    return "unknown"  # Would parse actual state here
-        
-        return "unknown"
+        notifications = device_info.get("notifications", [])
+        if not isinstance(notifications, list):
+            return "Unknown"
+
+        for notification in notifications:
+            match = re.search(r'cpar=\{"c77":(\d+)\}#', notification)
+            if match:
+                full_value = int(match.group(1))
+                door_status = full_value & 0xFF
+                return C77_STATUS_DESC.get(door_status, f"Unknown ({door_status})")
+
+        return "Unknown"
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -146,37 +201,39 @@ class KubeGateStateSensor(CoordinatorEntity, SensorEntity):
         attrs = {
             ATTR_MAC_ADDRESS: self.coordinator.mac_address,
         }
-        
+
         if self.coordinator.data:
             device_info = self.coordinator.data.get("device_info", {})
-            if device_info:
-                attrs["device_parameters"] = len(device_info)
-        
+            notifications = device_info.get("notifications", [])
+            if isinstance(notifications, list) and notifications:
+                attrs["notification_list"] = notifications
+
         return attrs
 
     @property
     def icon(self) -> str:
         """Return the icon for the sensor."""
         state = self.native_value
-        if state == "open":
+        if "Open" in state and "ing" not in state and "Partial" not in state:
             return "mdi:gate-open"
-        elif state == "closed":
+        if "Closed" in state or "closed" in state or "Door stopped" in state:
             return "mdi:gate"
-        elif state in ["opening", "closing"]:
+        if "Opening" in state or "Closing" in state or "closing" in state:
             return "mdi:gate-arrow-right"
-        elif state == "partially_open":
+        if "Partial" in state or "Aeration" in state or "stop" in state.lower() or "Stop" in state:
             return "mdi:gate-buffer"
-        else:
-            return "mdi:help-circle"
+        if "Error" in state or "error" in state or "malfunction" in state:
+            return "mdi:alert-circle"
+        return "mdi:help-circle"
 
 
-class KubeMaintenanceSensor(CoordinatorEntity, SensorEntity):
-    """Representation of a KUBE maintenance info sensor."""
+class KubeTotalCyclesSensor(CoordinatorEntity, SensorEntity):
+    """Representation of a KUBE total cycle count sensor."""
 
     def __init__(self, coordinator: KubeDataUpdateCoordinator) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator)
-        self._attr_unique_id = f"{coordinator.mac_address}_{ENTITY_MAINTENANCE_INFO}"
+        self._attr_unique_id = f"{coordinator.mac_address}_{ENTITY_TOTAL_CYCLES}"
         self._attr_has_entity_name = True
 
     @property
@@ -187,49 +244,82 @@ class KubeMaintenanceSensor(CoordinatorEntity, SensorEntity):
     @property
     def name(self) -> str:
         """Return the name of the sensor."""
-        return "Maintenance Info"
+        return "Total Cycles"
 
     @property
-    def native_value(self) -> str:
-        """Return the state of the sensor."""
+    def native_value(self) -> int | None:
+        """Return the total cycle count."""
         if not self.coordinator.data or not self.coordinator.data.get("is_connected"):
-            return "unavailable"
-        
-        # Try to extract maintenance info from device info
+            return None
+
         device_info = self.coordinator.data.get("device_info", {})
-        
-        # Look for maintenance-related information
-        for key, value in device_info.items():
-            if "maintenance" in key.lower() or "cycle" in key.lower():
-                return str(value) if value else "no_data"
-        
-        return "no_data"
+        notifications = device_info.get("notifications", [])
+        if not isinstance(notifications, list):
+            return None
+
+        return _get_cpar_value(notifications, "c6A")
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return the state attributes."""
-        attrs = {
-            ATTR_MAC_ADDRESS: self.coordinator.mac_address,
-        }
-        
-        if self.coordinator.data:
-            device_info = self.coordinator.data.get("device_info", {})
-            
-            # Add all device info as attributes for debugging
-            for key, value in device_info.items():
-                # Clean up the key name for attributes
-                attr_key = key.lower().replace(" ", "_")
-                attrs[f"device_{attr_key}"] = str(value) if value else ""
-        
-        return attrs
+        return {ATTR_MAC_ADDRESS: self.coordinator.mac_address}
 
     @property
     def icon(self) -> str:
         """Return the icon for the sensor."""
-        return "mdi:wrench"
+        return "mdi:counter"
 
     @property
-    def available(self) -> bool:
-        """Return if entity is available."""
-        # For connect-per-command pattern, sensors are available if we have coordinator data
-        return bool(self.coordinator.data)
+    def unit_of_measurement(self) -> str:
+        """Return the unit of measurement."""
+        return "cycles"
+
+
+class KubeCyclesToMaintenanceSensor(CoordinatorEntity, SensorEntity):
+    """Representation of a KUBE cycles to maintenance sensor."""
+
+    def __init__(self, coordinator: KubeDataUpdateCoordinator) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.mac_address}_{ENTITY_CYCLES_TO_MAINTENANCE}"
+        self._attr_has_entity_name = True
+
+    @property
+    def device_info(self) -> dict[str, Any]:
+        """Return device information."""
+        return self.coordinator.device_info
+
+    @property
+    def name(self) -> str:
+        """Return the name of the sensor."""
+        return "Cycles to Maintenance"
+
+    @property
+    def native_value(self) -> int | None:
+        """Return the cycles remaining until maintenance."""
+        if not self.coordinator.data or not self.coordinator.data.get("is_connected"):
+            return None
+
+        device_info = self.coordinator.data.get("device_info", {})
+        notifications = device_info.get("notifications", [])
+        if not isinstance(notifications, list):
+            return None
+
+        return _get_cpar_value(notifications, "c6B")
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the state attributes."""
+        return {ATTR_MAC_ADDRESS: self.coordinator.mac_address}
+
+    @property
+    def icon(self) -> str:
+        """Return the icon for the sensor."""
+        return "mdi:calendar-clock"
+
+    @property
+    def unit_of_measurement(self) -> str:
+        """Return the unit of measurement."""
+        return "cycles"
+
+

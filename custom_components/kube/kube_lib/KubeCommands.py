@@ -372,16 +372,30 @@ class KubeCommands:
                     
                     # Append new chunk to buffer
                     updated_buffer = existing_buffer + text_chunk
+                    
+                    # Extract all complete messages delimited by '#'
+                    complete_messages = []
+                    while '#' in updated_buffer:
+                        message_end = updated_buffer.find('#')
+                        complete_message = updated_buffer[:message_end + 1]
+                        complete_messages.append(complete_message.strip())
+                        updated_buffer = updated_buffer[message_end + 1:]
+                    
+                    # Store remaining incomplete data back to buffer
                     device.store_string_value("notification_buffer", updated_buffer)
                     
-                    # Check if we have a complete message (ends with # or other delimiter)
-                    if text_chunk.endswith('#') or text_chunk.endswith('\n') or text_chunk.endswith('\r'):
-                        # Complete message received, store as latest notification
-                        device.store_string_value("latest_notification", updated_buffer.strip())
-                        _LOGGER.info("Complete notification received for device %s: %s", self.mac, updated_buffer.strip())
+                    if complete_messages:
+                        # Get existing notification list or create new one
+                        existing_notifications = device.get_device_param_or_default("notification_list", [])
+                        if not isinstance(existing_notifications, list):
+                            existing_notifications = []
                         
-                        # Clear the buffer for next message
-                        device.store_string_value("notification_buffer", "")
+                        for message in complete_messages:
+                            _LOGGER.info("Complete notification received for device %s: %s", self.mac, message)
+                            existing_notifications.append(message)
+                        
+                        device.store_string_value("notification_list", existing_notifications)
+                        device.store_string_value("latest_notification", complete_messages[-1])
                     else:
                         # Partial message, keep buffering
                         _LOGGER.debug("Buffering partial notification for device %s (total length: %d)", self.mac, len(updated_buffer))
@@ -524,10 +538,18 @@ class KubeCommands:
             
             device = self.kube_bt_client.get_kube_device(self.mac)
             
+            # Clear notification list BEFORE sending commands so we capture all responses
+            device.store_string_value("notification_list", [])
+            device.store_string_value("notification_buffer", "")
+            
             # Send status request commands
             commands = [
-                # '@0005kbinf#',  # Basic info # commented as there is a bug preventing the second notification from being returned
+                '@0005kbinf#',  # Basic info
                 '@0004cinf#',   # Configuration info
+                '@0012cpar={"par":"c6A"}#',   # read total cycles
+                '@0012cpar={"par":"c6B"}#',   # read cycles to maintenance
+                '@0012cpar={"par":"c76"}#',   # read lights/inputs status
+                '@0014cpar={"par":"c77.1"}#',  # read gate status
             ]
             
             for cmd in commands:
@@ -569,12 +591,36 @@ class KubeCommands:
                     # Wait between commands
                     await asyncio.sleep(0.5)
             
-            # Wait for responses
-            await asyncio.sleep(2)
+            # Wait for all expected notifications (poll with timeout)
+            expected_count = len(commands)
+            timeout = 5.0
+            poll_interval = 0.1
+            elapsed = 0.0
             
-            # Extract status from device parameters
-            status = {}
+            while elapsed < timeout:
+                notification_list = device.get_device_param_or_default("notification_list", [])
+                if isinstance(notification_list, list) and len(notification_list) >= expected_count:
+                    break
+                await asyncio.sleep(poll_interval)
+                elapsed += poll_interval
+            
+            # Extract all received notifications
+            notification_list = device.get_device_param_or_default("notification_list", [])
+            if not isinstance(notification_list, list):
+                notification_list = []
+            
+            _LOGGER.info("Device %s: received %d of %d expected notifications", 
+                        self.mac, len(notification_list), expected_count)
+            
+            status = {
+                "notifications": notification_list,
+                "notification_count": len(notification_list),
+            }
+            
+            # Also include raw device params for backwards compatibility
             for key, value in device.device_params.items():
+                if key in ("notification_list", "notification_buffer", "latest_notification"):
+                    continue
                 if isinstance(value, (bytes, bytearray)):
                     try:
                         status[key] = value.decode('utf-8', errors='ignore')
