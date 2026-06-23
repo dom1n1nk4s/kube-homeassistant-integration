@@ -149,6 +149,14 @@ class KubeBtClient:
                 client = self.connections.get(address)
             
             if client and client.is_connected:
+                # Stop notifications first to properly clean up CCCD on the device
+                try:
+                    await self.stop_notify_async(
+                        client,
+                        "f1110021-0190-4567-8fab-4d4158a4eeaf"
+                    )
+                except Exception:
+                    pass
                 await client.disconnect()
             
             # Clean up

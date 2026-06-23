@@ -30,6 +30,7 @@ class KubeCommands:
         self.master_key = master_key
         self.kube_bt_client = kube_bt_client or KubeBtClient()
         self.operation_builder = OperationBuilder(self.kube_bt_client)
+        self._operation_lock = asyncio.Lock()
         
         # Store passkey in device for authentication
         passkey_str = str(passkey).zfill(16)
@@ -236,6 +237,7 @@ class KubeCommands:
         Returns:
             bool: True if successful, False otherwise
         """
+        client = None
         try:
             # Connect to device
             client = await self.kube_bt_client.connect_bt_gatt_async(
@@ -312,12 +314,22 @@ class KubeCommands:
                 else:
                     _LOGGER.warning("Authentication failed for device %s - sec_state: %s", 
                                   self.mac, sec_state.hex() if sec_state else 'None')
+                    # Clean up connection on failure
+                    await self.kube_bt_client.disconnect_bt_gatt_async(self.mac, client)
+                    client = None
                     return False
             
+            # No nonce data received
+            await self.kube_bt_client.disconnect_bt_gatt_async(self.mac, client)
+            client = None
             return False
             
         except Exception as e:
             _LOGGER.error("Connection/authentication failed for device %s: %s", self.mac, e)
+            # Clean up connection before retry
+            if client:
+                await self.kube_bt_client.disconnect_bt_gatt_async(self.mac, client)
+                client = None
             if retry_once:
                 _LOGGER.debug("Retrying connection for device %s", self.mac)
                 return await self._connect_and_authenticate_async(timeout, False)
@@ -428,70 +440,71 @@ class KubeCommands:
         Returns:
             bool: True if successful, False otherwise
         """
-        client = None
-        try:
-            # Connect and authenticate
-            if not await self._connect_and_authenticate_async():
+        async with self._operation_lock:
+            client = None
+            try:
+                # Connect and authenticate
+                if not await self._connect_and_authenticate_async():
+                    return False
+                
+                client = self.kube_bt_client.connections.get(self.mac)
+                if not client:
+                    _LOGGER.error("No client connection found for device %s after authentication", self.mac)
+                    return False
+                
+                # Encrypt and send command in 16-byte chunks
+                device = self.kube_bt_client.get_kube_device(self.mac)
+                enckey2 = device.get_device_param_bytes("enckey2")
+                
+                if enckey2:
+                    cmd_bytes = command.encode('utf-8')
+                    
+                    # Write command in 16-byte intervals (matching PayloadBuilder.add_write_characteristic_payload)
+                    byte_index = 0
+                    total_length = len(cmd_bytes)
+                    
+                    while byte_index < total_length:
+                        # Get 16-byte chunk (or remaining bytes if less than 16)
+                        end_index = min(byte_index + 16, total_length)
+                        chunk = cmd_bytes[byte_index:end_index]
+                        
+                        # Encrypt this chunk
+                        encrypted_chunk = bytearray(len(chunk))
+                        self.kube_bt_client.cipher_helper_xor_byte_arrays(chunk, encrypted_chunk, enckey2)
+                        
+                        # Write this chunk
+                        success = await self.kube_bt_client.write_characteristic_async(
+                            client,
+                            "f1110020-0190-4567-8fab-4d4158a4eeaf",
+                            "f1110022-0190-4567-8fab-4d4158a4eeaf",
+                            bytes(encrypted_chunk)
+                        )
+                        
+                        if not success:
+                            _LOGGER.warning("Failed to write chunk at byte %d to device %s", byte_index, self.mac)
+                            return False
+                        
+                        # Small delay between chunks to ensure proper transmission
+                        if end_index < total_length:
+                            await asyncio.sleep(0.05)  # 50ms delay between chunks
+                        
+                        byte_index = end_index
+                    
+                    # Wait for response after all chunks sent
+                    await asyncio.sleep(1)
+                    return True
+                else:
+                    _LOGGER.error("No encryption key (enckey2) available for device %s", self.mac)
+                
                 return False
-            
-            client = self.kube_bt_client.connections.get(self.mac)
-            if not client:
-                _LOGGER.error("No client connection found for device %s after authentication", self.mac)
+                
+            except Exception as e:
+                _LOGGER.error("Command '%s' failed for device %s: %s", command, self.mac, e)
                 return False
-            
-            # Encrypt and send command in 16-byte chunks
-            device = self.kube_bt_client.get_kube_device(self.mac)
-            enckey2 = device.get_device_param_bytes("enckey2")
-            
-            if enckey2:
-                cmd_bytes = command.encode('utf-8')
-                
-                # Write command in 16-byte intervals (matching PayloadBuilder.add_write_characteristic_payload)
-                byte_index = 0
-                total_length = len(cmd_bytes)
-                
-                while byte_index < total_length:
-                    # Get 16-byte chunk (or remaining bytes if less than 16)
-                    end_index = min(byte_index + 16, total_length)
-                    chunk = cmd_bytes[byte_index:end_index]
-                    
-                    # Encrypt this chunk
-                    encrypted_chunk = bytearray(len(chunk))
-                    self.kube_bt_client.cipher_helper_xor_byte_arrays(chunk, encrypted_chunk, enckey2)
-                    
-                    # Write this chunk
-                    success = await self.kube_bt_client.write_characteristic_async(
-                        client,
-                        "f1110020-0190-4567-8fab-4d4158a4eeaf",
-                        "f1110022-0190-4567-8fab-4d4158a4eeaf",
-                        bytes(encrypted_chunk)
-                    )
-                    
-                    if not success:
-                        _LOGGER.warning("Failed to write chunk at byte %d to device %s", byte_index, self.mac)
-                        return False
-                    
-                    # Small delay between chunks to ensure proper transmission
-                    if end_index < total_length:
-                        await asyncio.sleep(0.05)  # 50ms delay between chunks
-                    
-                    byte_index = end_index
-                
-                # Wait for response after all chunks sent
-                await asyncio.sleep(1)
-                return True
-            else:
-                _LOGGER.error("No encryption key (enckey2) available for device %s", self.mac)
-            
-            return False
-            
-        except Exception as e:
-            _LOGGER.error("Command '%s' failed for device %s: %s", command, self.mac, e)
-            return False
-        finally:
-            # Always disconnect
-            if client:
-                await self.kube_bt_client.disconnect_bt_gatt_async(self.mac, client)
+            finally:
+                # Always disconnect
+                if client:
+                    await self.kube_bt_client.disconnect_bt_gatt_async(self.mac, client)
     
     @staticmethod
     def _build_c30b_command(val: int) -> str:
@@ -526,118 +539,119 @@ class KubeCommands:
         Returns:
             dict: Device status information
         """
-        client = None
-        try:
-            # Connect and authenticate
-            if not await self._connect_and_authenticate_async():
-                return {}
-            
-            client = self.kube_bt_client.connections.get(self.mac)
-            if not client:
-                return {}
-            
-            device = self.kube_bt_client.get_kube_device(self.mac)
-            
-            # Clear notification list BEFORE sending commands so we capture all responses
-            device.store_string_value("notification_list", [])
-            device.store_string_value("notification_buffer", "")
-            
-            # Send status request commands
-            commands = [
-                '@0005kbinf#',  # Basic info
-                '@0004cinf#',   # Configuration info
-                '@0012cpar={"par":"c6A"}#',   # read total cycles
-                '@0012cpar={"par":"c6B"}#',   # read cycles to maintenance
-                '@0012cpar={"par":"c76"}#',   # read lights/inputs status
-                '@0014cpar={"par":"c77.1"}#',  # read gate status
-            ]
-            
-            for cmd in commands:
-                enckey2 = device.get_device_param_bytes("enckey2")
-                if enckey2:
-                    cmd_bytes = cmd.encode('utf-8')
-                    
-                    # Write command in 16-byte intervals (matching PayloadBuilder.add_write_characteristic_payload)
-                    byte_index = 0
-                    total_length = len(cmd_bytes)
-                    
-                    while byte_index < total_length:
-                        # Get 16-byte chunk (or remaining bytes if less than 16)
-                        end_index = min(byte_index + 16, total_length)
-                        chunk = cmd_bytes[byte_index:end_index]
+        async with self._operation_lock:
+            client = None
+            try:
+                # Connect and authenticate
+                if not await self._connect_and_authenticate_async():
+                    return {}
+                
+                client = self.kube_bt_client.connections.get(self.mac)
+                if not client:
+                    return {}
+                
+                device = self.kube_bt_client.get_kube_device(self.mac)
+                
+                # Clear notification list BEFORE sending commands so we capture all responses
+                device.store_string_value("notification_list", [])
+                device.store_string_value("notification_buffer", "")
+                
+                # Send status request commands
+                commands = [
+                    '@0005kbinf#',  # Basic info
+                    '@0004cinf#',   # Configuration info
+                    '@0012cpar={"par":"c6A"}#',   # read total cycles
+                    '@0012cpar={"par":"c6B"}#',   # read cycles to maintenance
+                    '@0012cpar={"par":"c76"}#',   # read lights/inputs status
+                    '@0014cpar={"par":"c77.1"}#',  # read gate status
+                ]
+                
+                for cmd in commands:
+                    enckey2 = device.get_device_param_bytes("enckey2")
+                    if enckey2:
+                        cmd_bytes = cmd.encode('utf-8')
                         
-                        # Encrypt this chunk
-                        encrypted_chunk = bytearray(len(chunk))
-                        self.kube_bt_client.cipher_helper_xor_byte_arrays(chunk, encrypted_chunk, enckey2)
+                        # Write command in 16-byte intervals (matching PayloadBuilder.add_write_characteristic_payload)
+                        byte_index = 0
+                        total_length = len(cmd_bytes)
                         
-                        # Write this chunk
-                        success = await self.kube_bt_client.write_characteristic_async(
-                            client,
-                            "f1110020-0190-4567-8fab-4d4158a4eeaf",
-                            "f1110022-0190-4567-8fab-4d4158a4eeaf",
-                            bytes(encrypted_chunk)
-                        )
+                        while byte_index < total_length:
+                            # Get 16-byte chunk (or remaining bytes if less than 16)
+                            end_index = min(byte_index + 16, total_length)
+                            chunk = cmd_bytes[byte_index:end_index]
+                            
+                            # Encrypt this chunk
+                            encrypted_chunk = bytearray(len(chunk))
+                            self.kube_bt_client.cipher_helper_xor_byte_arrays(chunk, encrypted_chunk, enckey2)
+                            
+                            # Write this chunk
+                            success = await self.kube_bt_client.write_characteristic_async(
+                                client,
+                                "f1110020-0190-4567-8fab-4d4158a4eeaf",
+                                "f1110022-0190-4567-8fab-4d4158a4eeaf",
+                                bytes(encrypted_chunk)
+                            )
+                            
+                            if not success:
+                                _LOGGER.warning("Failed to write chunk at byte %d to device %s", byte_index, self.mac)
+                                return {}
+                            
+                            # Small delay between chunks to ensure proper transmission
+                            if end_index < total_length:
+                                await asyncio.sleep(0.05)  # 50ms delay between chunks
+                            
+                            byte_index = end_index
                         
-                        if not success:
-                            _LOGGER.warning("Failed to write chunk at byte %d to device %s", byte_index, self.mac)
-                            return {}
-                        
-                        # Small delay between chunks to ensure proper transmission
-                        if end_index < total_length:
-                            await asyncio.sleep(0.05)  # 50ms delay between chunks
-                        
-                        byte_index = end_index
-                    
-                    # Wait between commands
-                    await asyncio.sleep(0.5)
-            
-            # Wait for all expected notifications (poll with timeout)
-            expected_count = len(commands)
-            timeout = 5.0
-            poll_interval = 0.1
-            elapsed = 0.0
-            
-            while elapsed < timeout:
+                        # Wait between commands
+                        await asyncio.sleep(0.5)
+                
+                # Wait for all expected notifications (poll with timeout)
+                expected_count = len(commands)
+                timeout = 5.0
+                poll_interval = 0.1
+                elapsed = 0.0
+                
+                while elapsed < timeout:
+                    notification_list = device.get_device_param_or_default("notification_list", [])
+                    if isinstance(notification_list, list) and len(notification_list) >= expected_count:
+                        break
+                    await asyncio.sleep(poll_interval)
+                    elapsed += poll_interval
+                
+                # Extract all received notifications
                 notification_list = device.get_device_param_or_default("notification_list", [])
-                if isinstance(notification_list, list) and len(notification_list) >= expected_count:
-                    break
-                await asyncio.sleep(poll_interval)
-                elapsed += poll_interval
-            
-            # Extract all received notifications
-            notification_list = device.get_device_param_or_default("notification_list", [])
-            if not isinstance(notification_list, list):
-                notification_list = []
-            
-            _LOGGER.info("Device %s: received %d of %d expected notifications", 
-                        self.mac, len(notification_list), expected_count)
-            
-            status = {
-                "notifications": notification_list,
-                "notification_count": len(notification_list),
-            }
-            
-            # Also include raw device params for backwards compatibility
-            for key, value in device.device_params.items():
-                if key in ("notification_list", "notification_buffer", "latest_notification"):
-                    continue
-                if isinstance(value, (bytes, bytearray)):
-                    try:
-                        status[key] = value.decode('utf-8', errors='ignore')
-                    except:
-                        status[key] = value.hex()
-                else:
-                    status[key] = str(value)
-            
-            return status
-            
-        except Exception as e:
-            _LOGGER.error("Status request failed for device %s: %s", self.mac, e)
-            return {}
-        finally:
-            # Always disconnect
-            if client:
-                await self.kube_bt_client.disconnect_bt_gatt_async(self.mac, client)
+                if not isinstance(notification_list, list):
+                    notification_list = []
+                
+                _LOGGER.info("Device %s: received %d of %d expected notifications", 
+                            self.mac, len(notification_list), expected_count)
+                
+                status = {
+                    "notifications": notification_list,
+                    "notification_count": len(notification_list),
+                }
+                
+                # Also include raw device params for backwards compatibility
+                for key, value in device.device_params.items():
+                    if key in ("notification_list", "notification_buffer", "latest_notification"):
+                        continue
+                    if isinstance(value, (bytes, bytearray)):
+                        try:
+                            status[key] = value.decode('utf-8', errors='ignore')
+                        except:
+                            status[key] = value.hex()
+                    else:
+                        status[key] = str(value)
+                
+                return status
+                
+            except Exception as e:
+                _LOGGER.error("Status request failed for device %s: %s", self.mac, e)
+                return {}
+            finally:
+                # Always disconnect
+                if client:
+                    await self.kube_bt_client.disconnect_bt_gatt_async(self.mac, client)
 
 
 # Convenience functions for Home Assistant integration
