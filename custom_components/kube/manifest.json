@@ -1,10 +1,10 @@
 {
   "domain": "kube",
   "name": "KUBE Gate System",
-  "codeowners": ["@user"],
+  "codeowners": ["@dom1n1nk4s"],
   "config_flow": true,
   "dependencies": [],
-  "documentation": "https://github.com/user/kube-homeassistant-integration",
+  "documentation": "https://github.com/dom1n1nk4s/kube-homeassistant-integration",
   "integration_type": "device",
   "iot_class": "local_push",
   "requirements": ["bleak>=0.20.0"],

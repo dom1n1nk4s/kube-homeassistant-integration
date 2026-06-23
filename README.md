@@ -32,7 +32,7 @@ A Home Assistant custom integration for controlling KUBE Bluetooth gate systems.
 
 The integration creates the following entities:
 
-### Switches
+### Buttons
 - **Open Gate**: Opens the gate completely
 - **Close Gate**: Closes the gate
 - **Toggle Gate**: Toggles gate state (open/close)
@@ -82,7 +82,7 @@ The integration supports the following KUBE operations:
 ### Architecture
 - **Coordinator**: Manages device communication and data updates
 - **Config Flow**: Handles device setup and authentication
-- **Entities**: Switch, light, and sensor entities for device control
+- **Entities**: Button, light, and sensor entities for device control
 - **Library Integration**: Uses the existing KUBE Python library
 
 ### Communication
@@ -105,7 +105,7 @@ custom_components/kube/
 ├── config_flow.py       # Configuration flow
 ├── const.py            # Constants
 ├── coordinator.py      # Data coordinator
-├── switch.py           # Switch entities
+├── button.py           # Button entities
 ├── light.py            # Light entity
 ├── sensor.py           # Sensor entities
 ├── strings.json        # UI translations
@@ -128,7 +128,7 @@ custom_components/kube/
 
 ## License
 
-This integration is provided as-is for educational and development purposes.
+MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## Support
 
@@ -139,6 +139,5 @@ For issues and questions:
 
 ## TODO
 
-2. make tests
-3. do total refactor of codebase to remove dead code and improve code quality.
-4. fix consecutive commands failing.
+1. add tests
+2. do total refactor of codebase to remove dead code and improve code quality.
