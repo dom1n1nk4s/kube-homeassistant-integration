@@ -1,6 +1,6 @@
 # KUBE Gate System - Home Assistant Integration
 
-A Home Assistant custom integration for controlling KUBE Bluetooth gate systems.
+A Home Assistant custom integration for controlling KUBE Bluetooth gate systems from [Key Automation](https://keyautomation.com/en). Based on reverse engineering of the [KUBE Android app](https://play.google.com/store/apps/details?id=it.keyautomation.kubeus).
 
 ## Features
 
